@@ -1,0 +1,86 @@
+---
+title: "Tables"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+
+```
+
+
+```{r}
+load("../Data/top_10_terms.RData")
+
+colnames(top_10) <- c("Performance", "Speech", "UN Interview", "ABC Interview")
+```
+
+#Tables for K-means
+```{r}
+#Performance
+load("../Data/perf_output.RData")
+
+colnames(cluster_summary_perf) <- c("Cluster", "Size", "Top Terms")
+
+perf_output <- kable(cluster_summary_perf, format = "latex", caption = "Clustering, 'Permission to Dance' Performance")
+
+perf_output
+
+
+#BTS Speech
+load("../Data/speech_output.RData")
+
+colnames(cluster_summary_speech) <- c("Cluster", "Size", "Top Terms")
+
+speech_output <- kable(cluster_summary_speech, format = "latex", caption = "Clustering, BTS Speech")
+
+speech_output
+
+
+#UN Interview
+load("../Data/unint_output.RData")
+
+colnames(cluster_summary_unint) <- c("Cluster", "Size", "Top Terms")
+
+unint_output <- kable(cluster_summary_unint, format = "latex", caption = "Clustering, UN Interview")
+
+unint_output
+
+
+#ABC Interview
+load("../Data/abc_output.RData")
+
+colnames(cluster_summary_abc) <- c("Cluster", "Size", "Top Terms")
+
+abc_output <- kable(cluster_summary_abc, format = "latex", caption = "Clustering, Nightline Interview")
+
+abc_output
+
+
+#Moon Speech
+load("../Data/moon_output.RData")
+
+colnames(cluster_summary_moon) <- c("Cluster", "Size", "Top Terms")
+
+moon_output <- kable(cluster_summary_moon, format = "latex", caption = "Clustering, Moon Speech")
+
+moon_output
+
+
+#Arirang
+load("../Data/arirang_output.RData")
+
+colnames(cluster_summary_arirang) <- c("Cluster", "Size", "Top Terms")
+
+arirang_output <- kable(cluster_summary_arirang, format = "latex", caption = "Clustering, Arirang Coverage")
+
+arirang_output
+
+```
+
+

@@ -1,0 +1,429 @@
+---
+title: "BTS sentiment"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tm)
+library(ggplot2)
+library(tidytext)
+library(stringr)
+library(lubridate)
+library(syuzhet)
+library(clipr)
+library(rvest)
+
+```
+
+#Loading Data
+
+```{r}
+load("../Data/video_stats.RData")
+
+load("../Data/video_comments.RData")
+
+
+comments <- dat_comments %>%
+  select(videoId, textDisplay, likeCount, publishedAt)
+
+```
+
+
+##Emojis - Get Sentiment Dictionary
+Only need to scrape dictionary once - otherwise load dataframe at the end of this chunk
+
+```{r}
+
+
+emojis <- function(i){
+  
+  html <- read_html(i)
+  
+  emoji <- html_nodes(html, "td:nth-child(1)") %>% #Finding emojis
+  html_text()
+
+  sentiment <- html_nodes(html, "td:nth-child(9)") %>% #Finding sentiment score for all emojis
+  html_text()
+
+  all_info <- list(emoji = emoji, sentiment = sentiment)
+  
+  return(all_info)
+  
+}
+
+
+emoji_sentiments <- emojis("http://kt.ijs.si/data/Emoji_sentiment_ranking/index.html")
+
+emoji_df <- unlist(emoji_sentiments$emoji) 
+
+emoji_df <- cbind(emoji_df, unlist(emoji_sentiments$sentiment)) %>%
+  as.data.frame() 
+
+names(emoji_df) <- c("emoji", "sentiment")
+
+#save(emoji_df, file = "../Data/emoji_dictionary.RData")
+#load("../Data/emoji_dictionary.RData")
+
+```
+
+
+#Emojis - Sentiment Analysis
+
+```{r}
+
+emoji_df$utf <- iconv(emoji_df$emoji, from = "latin1", to = "ascii", sub = "byte") #converting emoji dictionary to utf
+
+text_utf <- iconv(comments$textDisplay, from = "latin1", to = "ascii", sub = "byte") #converting comments text to utf
+
+text_utf <- data.frame(text_utf, 1:length(text_utf)) #creating utf dataframe for comments
+
+names(text_utf) <- c("utf", "ID") 
+
+text_utf <- text_utf %>% 
+  mutate(emoji = str_extract_all(utf, "<f0>(<\\w*|\\d*>){6}+")) #extracting all utf emojis - pattern = <f0><xx><xx><xx>
+
+#text_utf$emoji[text_utf$emoji == "character(0)"] <- NA #adding NAs for comments without an emoji
+
+
+spacing <- function(i){
+  paste(i, collapse=" ")
+}
+
+text_utf$emoji <- map(text_utf$emoji, spacing) #adding space separation between each utf emoji
+
+
+corpus <- as.data.frame(comments$text) %>% #creating full corpus
+  rename(text = "comments$text")
+
+corpus$text <- removePunctuation(as.character(corpus$text)) #removing punctuation before adding emoji unicode
+corpus$text <- removeNumbers(as.character(corpus$text)) #same for numbers
+
+corpus$ID <- as.numeric(rownames(corpus)) #adding ID column to join
+
+
+corpus <- full_join(corpus, text_utf) #joining dataframes by ID
+
+corpus$text <- str_c(corpus$text, " ", text_utf$emoji) #adding emoji unicode into text
+
+corpus <- cbind(corpus, comments$videoId) %>%
+  rename(videoId = "comments$videoId")
+
+```
+
+
+##Creating full DTM - DO THIS PER VIDEO NEXT - MATRIX TOO BIG
+
+```{r}
+#this performance video still too large to compute
+perf <- corpus %>%
+  filter(videoId == "9SmQOZWNyWE") %>%
+  select(videoId, text)
+
+perf_1 <- perf %>%
+    filter(row(perf) <= 41000)
+
+perf_2 <- perf %>%
+    filter(row(perf) > 41000)
+
+
+speech <- corpus %>%
+  filter(videoId == "jzptPcPLCnA") %>%
+  select(videoId, text)
+
+un_int <- corpus %>%
+  filter(videoId == "wAXcMD5dOBA") %>%
+  select(videoId, text)
+
+abc_int <- corpus %>%
+  filter(videoId == "NWwPyY7OHig") %>%
+  select(videoId, text)
+
+moon <- corpus %>%
+  filter(videoId == "wT6qgOBRrps") %>%
+  select(videoId, text)
+
+arirang <- corpus %>%
+  filter(videoId == "N11sD4isDRI") %>%
+  select(videoId, text)
+
+
+#corpora
+doc_perf_1 <- Corpus(VectorSource(perf_1$text))
+doc_perf_2 <- Corpus(VectorSource(perf_2$text))
+doc_speech <- Corpus(VectorSource(speech$text))
+doc_un <- Corpus(VectorSource(un_int$text))
+doc_abc <- Corpus(VectorSource(abc_int$text))
+doc_moon <- Corpus(VectorSource(moon$text))
+doc_arirang <- Corpus(VectorSource(arirang$text))
+
+
+#dtms
+dtm_perf_1 <- DocumentTermMatrix(doc_perf_1,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_perf_1 <- as.data.frame(as.matrix(dtm_perf_1))
+
+dtm_perf_2 <- DocumentTermMatrix(doc_perf_2,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_perf_2 <- as.data.frame(as.matrix(dtm_perf_2))
+
+
+dtm_speech <- DocumentTermMatrix(doc_speech,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_speech <- as.data.frame(as.matrix(dtm_speech))
+
+
+dtm_un <- DocumentTermMatrix(doc_un,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_un <- as.data.frame(as.matrix(dtm_un))
+
+
+dtm_abc <- DocumentTermMatrix(doc_abc,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_abc <- as.data.frame(as.matrix(dtm_abc))
+
+
+dtm_moon <- DocumentTermMatrix(doc_moon,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_moon <- as.data.frame(as.matrix(dtm_moon))
+
+
+dtm_arirang <- DocumentTermMatrix(doc_arirang,
+           control = list(tolower = TRUE,
+                          stopwords = TRUE
+                         ))
+
+dtm_arirang <- as.data.frame(as.matrix(dtm_arirang))
+
+```
+
+
+#Sentiment analysis - emojis
+
+```{r}
+#Creating dictionary
+sent <- emoji_df  #loading sentiment dictionary
+
+names(sent) <- c("emoji", "value", "word") #prepping sent dataframe to merge with syuzhet dictionary
+sent$word <- as.character(sent$word)
+sent$value <- as.numeric(as.character(sent$value))
+
+dic <- get_sentiment_dictionary("syuzhet") #loading syuzhet dictionary
+
+sent <- full_join(sent, dic) #join full dictionary
+```
+
+##Analyses
+
+#Performance
+```{r}
+#Perf 1
+words <- data.frame(word = colnames(dtm_perf_1)) #putting individual words into dataframe
+#head(words)
+
+head(dtm_perf_1)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_perf_1) %*% vec
+
+comments$emoji_sentiment <- NA
+
+
+comments$emoji_sentiment[1:41000] <- emoji_scores
+
+#Perf 2
+
+words <- data.frame(word = colnames(dtm_perf_2)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_perf_2) %*% vec
+
+comments$emoji_sentiment[41001:83704] <- emoji_scores
+
+```
+
+#Speech
+
+```{r}
+
+words <- data.frame(word = colnames(dtm_speech)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_speech) %*% vec
+
+comments$emoji_sentiment[83705:93073] <- emoji_scores
+
+```
+
+
+#Moon
+
+```{r}
+
+words <- data.frame(word = colnames(dtm_moon)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_moon) %*% vec
+
+comments$emoji_sentiment[109199:109668] <- emoji_scores
+
+```
+
+#Arirang
+
+```{r}
+
+words <- data.frame(word = colnames(dtm_arirang)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_arirang) %*% vec
+
+comments$emoji_sentiment[109669:110152] <- emoji_scores
+
+```
+
+#UN
+
+```{r}
+
+words <- data.frame(word = colnames(dtm_un)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_un) %*% vec
+
+comments$emoji_sentiment[93074:106596] <- emoji_scores
+
+```
+
+#ABC
+```{r}
+
+words <- data.frame(word = colnames(dtm_abc)) #putting individual words into dataframe
+#head(words)
+
+words$ID <- rownames(words)
+
+words <- merge(words, sent, all.x = T) #merging
+
+words$value[is.na(words$value)] <- 0 #adding score of 0 for neutral words (NAs)
+head(words)
+
+words <- words[order(as.numeric(words$ID)),]
+words <- words[!duplicated(words$ID),] #one duplicated row - 31284
+
+
+vec <- as.numeric(words$value)
+  
+emoji_scores <- as.matrix(dtm_abc) %*% vec
+
+comments$emoji_sentiment[106597:109199] <- emoji_scores
+
+```
+
+
+#Compiling
+
+```{r}
+
+sentiments_df <- comments %>%
+  select(videoId, textDisplay, emoji_sentiment)
+
+save(sentiments_df, file = "../Data/full_sentiments.RData")
+
+```

@@ -1,0 +1,184 @@
+---
+title: "BTS Data Vis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tm)
+library(ggplot2)
+library(tidytext)
+library(stringr)
+library(lubridate)
+library(syuzhet)
+library(clipr)
+library(rvest)
+```
+
+```{r}
+load(file = "../Data/full_sentiments.RData")
+load("../Data/video_stats.RData")
+load("../Data/video_comments.RData")
+```
+
+##Visualization - all including emojis
+
+```{r}
+
+comments_gg <- sentiments_df %>%
+  mutate(IDs = 1:length(videoId)) %>%
+  select(IDs, videoId, textDisplay, emoji_sentiment)
+
+stats$title
+
+comments_gg <- comments_gg %>%
+  mutate(title = if_else(videoId == "9SmQOZWNyWE", "'Permission to Dance' Performance",
+                         if_else(videoId == "jzptPcPLCnA", "Speech at the UN",
+                                 if_else(videoId == "wAXcMD5dOBA", "UN Interview",
+                                         if_else(videoId == "NWwPyY7OHig", "Nightline Interview",
+                                                 if_else(videoId == "wT6qgOBRrps", "Moon Speech",
+                                                         if_else(videoId == "N11sD4isDRI", "Arirang Coverage",
+                                                 "NA"))))))) %>%
+  group_by(title)
+
+#Removing outliers (ie comments with rows and rows of emojis)
+iqr <- IQR(comments_gg$emoji_sentiment)
+Q <- quantile(comments_gg$emoji_sentiment, probs=c(.25, .75), na.rm = FALSE)
+
+comments_gg <- subset(comments_gg, comments_gg$emoji_sentiment > (Q[1] - 1.5*iqr) & comments_gg$emoji_sentiment < (Q[2]+1.5*iqr))
+
+#Remove 0s - discuss this
+comments_gg <- comments_gg %>%
+ filter(emoji_sentiment != 0)
+
+```
+
+
+##Stats
+```{r}
+
+avgs <- comments_gg %>%
+  summarize(sample.mean = mean(emoji_sentiment),
+            sample.sd = sd(emoji_sentiment),
+            sample.se = sample.sd/sqrt(n()),
+            df = n() - 1,
+            mu0 = 0,
+            t.star = (sample.mean - mu0)/sample.se,
+            P.value = 2 * pt(abs(t.star), df = df, lower.tail = FALSE))
+
+
+avgs <-  avgs %>%
+  mutate(ci95.lower = sample.mean - abs(qt(0.025, df = df)) * sample.se,
+         ci95.upper = sample.mean + abs(qt(0.025, df = df)) * sample.se)
+
+```
+
+##GGplot Sentiments by Video
+
+```{r}
+#pdf(file = "../Results/sentiment_scores.pdf")
+
+ggplot(comments_gg, aes(x = title, y = emoji_sentiment, color = title)) + 
+  geom_jitter() +
+  geom_pointrange(data = avgs, aes(x = title, y = sample.mean, ymin = ci95.lower, ymax = ci95.upper), size = .4, color = "darkslategray", width = .2) +
+  labs(title = "YouTube Comments, BTS at the UN", subtitle = "Gray points represent sample mean and 95% CI", x = "Videos", y = "Sentiment Score") + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  geom_hline(yintercept = 0, linetype = "dotted", color = "darkslategray")
+
+#dev.off()
+ 
+
+```
+
+##GGplot Sentiments Over Time
+
+```{r}
+
+comments_gg$time <- as.Date(comments$publishedAt)
+
+#pdf(file = "../Results/sentiment_time.pdf")
+
+ggplot(comments_gg, aes(time, emoji_sentiment)) +
+  geom_jitter(color = "royalblue") + 
+  geom_smooth(model = "lm", color = "DarkSlateGray")
+
+#dev.off()
+```
+
+
+
+
+
+##Analysis with Likes
+
+```{r}
+likes <- sentiments_df %>%
+  mutate(likes = as.numeric(dat_comments$likeCount)) %>%
+  mutate(IDs = 1:length(videoId))
+
+likes <- likes %>%
+  mutate(title = if_else(videoId == "9SmQOZWNyWE", "'Permission to Dance' Performance",
+                         if_else(videoId == "jzptPcPLCnA", "Speech at the UN",
+                                 if_else(videoId == "wAXcMD5dOBA", "UN Interview",
+                                         if_else(videoId == "NWwPyY7OHig", "Nightline Interview", "NA"))))) %>%
+  group_by(title)
+
+#Removing outliers (ie comments with rows and rows of emojis)
+iqr <- IQR(likes$emoji_sentiment)
+Q <- quantile(likes$emoji_sentiment, probs=c(.25, .75), na.rm = FALSE)
+
+likes <- likes %>%
+  subset(emoji_sentiment > (Q[1] - 1.5*iqr) & emoji_sentiment < (Q[2]+1.5*iqr))
+
+#Remove 0s - discuss this
+likes <- likes %>%
+ filter(emoji_sentiment != 0)
+
+
+#Regressions
+like_lm <- lm(likes ~ emoji_sentiment, data = likes)
+
+summary(like_lm)
+
+like_glm <- glm(likes ~ emoji_sentiment, family = poisson(), data = likes)
+
+summary(like_glm)
+
+
+avgs <- likes %>%
+  summarize(sample.mean = mean(emoji_sentiment),
+            sample.sd = sd(emoji_sentiment),
+            sample.se = sample.sd/sqrt(n()),
+            df = n() - 1,
+            mu0 = 0,
+            t.star = (sample.mean - mu0)/sample.se,
+            P.value = 2 * pt(abs(t.star), df = df, lower.tail = FALSE))
+
+
+avgs <-  avgs %>%
+  mutate(ci95.lower = sample.mean - abs(qt(0.025, df = df)) * sample.se,
+         ci95.upper = sample.mean + abs(qt(0.025, df = df)) * sample.se)
+
+
+#pdf("sentiment_with_likes.pdf")
+ggplot(comments_gg, aes(x = title, y = emoji_sentiment, color = title)) + 
+  geom_jitter() +
+  geom_pointrange(data = avgs, aes(x = title, y = sample.mean, ymin = ci95.lower, ymax = ci95.upper), size = .4, color = "darkslategray", width = .2) +
+  labs(title = "YouTube Comments, BTS at the UN", subtitle = "Gray points represent sample mean and 95% CI", x = "Songs", y = "Sentiment Score") + 
+  theme(legend.position = "none") + 
+  coord_flip() + 
+  geom_hline(yintercept = 0, linetype = "dotted", color = "darkslategray")
+#dev.off()
+
+likes <- likes %>%
+  select(IDs, title, textDisplay, emoji_sentiment, likes)
+
+```
+
+
+```{r}
+write.csv(comments_gg,"../Data/all_comments.csv", row.names = FALSE)
+write.csv(likes, "../Data/comments_with_likes.csv", row.names = FALSE)
+```

@@ -1,0 +1,1380 @@
+---
+title: "BTS_scraping"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tuber) 
+library(magrittr) 
+library(tidyverse)
+library(purrr) 
+library(tm)
+library(ggplot2)
+library(tidytext)
+library(stringr)
+library(textdata)
+library(lubridate)
+library(knitr)
+library(stargazer)
+library(cluster)
+library(tau)
+library(stm)
+library(quanteda)
+library(furrr)
+
+set.seed(12345)
+```
+
+##Google Authentification
+#Note: to skip scraping and load full scraped dataset, see below
+
+```{r}
+
+client_id <- "" #insert client id here
+client_secret <- "" #insert here
+
+# use the youtube oauth 
+yt_oauth(app_id = client_id,
+         app_secret = client_secret,
+         token = "")
+```
+
+##IDs
+
+```{r}
+#Six main videos
+vids <- c("9SmQOZWNyWE", "jzptPcPLCnA", "wAXcMD5dOBA", "NWwPyY7OHig", "wT6qgOBRrps", "N11sD4isDRI")
+
+#vid_ids <- as.vector(vids$contentDetails.videoId)
+```
+
+
+##Vid Stats
+
+```{r}
+
+#getting video details for all vids (title, tags, etc)
+dat_details <- map_dfr(vids, get_video_details) %>%
+  unnest()
+
+details <- dat_details %>%
+  filter(grepl("title", items)) %>%
+  unnest() #removing unnecessary data
+
+#video titles
+title <- c("BTS - 'Permission to Dance' performed at the United Nations General Assembly | SDGs | Official Video", "President Moon Jae-in & BTS at the Sustainable Development Goals Moment | United Nations (English)", "BTS Shine Spotlight on the United Nations as Envoys of the President of the Republic of Korea", "BTS partners with Korean president as special presidential envoys | Nightline", "🇰🇷 Republic of Korea - President Addresses General Debate, 76th Session (English) | #UNGA", "[LIVE] SDG Moment 2021 (#BTS)")
+
+
+#selecting just video upload date
+
+date <- details %>%
+  filter(grepl("^2021", items)) %>%
+  filter(!grepl("title", items)) %>%
+  select(items) %>%
+  unique()
+
+#getting number of likes, comments, etc
+
+dat_stats <- map_dfr(vids, get_stats)
+
+stats <- dat_stats %>%
+  mutate(views = as.numeric(viewCount)) %>%
+  mutate(likes = as.numeric(likeCount)) %>%
+  mutate(comments = as.numeric(commentCount))
+
+class(date)
+
+#adding date and title into stats df
+
+stats <- cbind(stats, date, title)
+
+```
+
+##Scraping Comments
+
+```{r}
+
+dat_comments <- map_dfr(vids, get_all_comments) #110152 comments
+
+head(dat_comments)
+
+```
+
+##Saving and Loading Scraped Data
+
+```{r}
+
+save(stats, vids, file = "../Data/video_stats.RData")
+#load("../Data/video_stats.RData")
+
+save(dat_comments, file = "../Data/video_comments.RData")
+#load("../Data/video_comments.RData")
+
+dat_comments <- dat_comments %>%
+  mutate(title = if_else(videoId == "9SmQOZWNyWE", "'Permission to Dance' Performance",
+                         if_else(videoId == "jzptPcPLCnA", "Speech at the UN",
+                                 if_else(videoId == "wAXcMD5dOBA", "UN Interview",
+                                         if_else(videoId == "NWwPyY7OHig", "Nightline Interview",
+                                                 if_else(videoId == "wT6qgOBRrps", "Moon Speech",
+                                                         if_else(videoId == "N11sD4isDRI", "Arirang Coverage",
+                                                 "NA"))))))) %>%
+  select(title, videoId, textDisplay, textOriginal, authorDisplayName, likeCount)
+
+#write.csv(dat_comments, file = "../Data/all_comments.csv")
+
+```
+
+
+#Table of General Stats
+```{r}
+
+stat_tab <- stats %>%
+  select(title, views, likes, comments)
+
+rownames(stat_tab) <- c(1:6)
+colnames(stat_tab) <- c("Title", "Views", "Likes", "Number of Comments")
+
+stat_tab <- stat_tab %>%
+  bind_rows(summarise_all(., funs(if(is.numeric(.)) sum(.) else "Total")))
+
+stargazer(stat_tab, title = "Summary Statistics, BTS UN YouTube Videos", summary = F)
+
+```
+
+
+##Topic Models
+
+#Performance Video
+```{r}
+#Filtering to performance video
+perf <- dat_comments %>%
+  filter(videoId == "9SmQOZWNyWE") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+perf$textDisplay <- gsub("[^\x01-\x7F]", "", perf$textDisplay)
+
+#fixing weird punctuation with apostrophes and such
+perf$textDisplay <- gsub("&#39;", "'", perf$textDisplay)
+
+perf$textDisplay <- gsub("<br>", "", perf$textDisplay)
+
+perf$textDisplay <- gsub("&quot;", "", perf$textDisplay)
+
+#Tidy DF
+tidy_df_perf <- perf %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+    filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "9smqozwnywe", word != "amp") 
+
+```
+
+```{r}
+#top words
+tidy_df_perf %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_perf$doc <- as.factor(tidy_df_perf$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_perf %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_perf, ggs, df_tf_idf, file = "../Data/perf_dfs.RData")
+load(file = "../Data/perf_dfs.RData")
+```
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_perf %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_perf %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+##Determine number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+
+#pdf(file = "../Results/diagnostics_perf.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "BTS Performance Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 3")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_perf.RData")
+#load(file = "../Data/many_models_perf.RData")
+
+
+```
+
+
+#Model!
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K =3, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_perf.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "Permission to Dance Performance Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+#pdf(file = "../Results/topic_ggs_perf.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+#Speech Video
+```{r}
+#Filtering to performance video
+speech <- dat_comments %>%
+  filter(videoId == "jzptPcPLCnA") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+speech$textDisplay <- gsub("[^\x01-\x7F]", "", speech$textDisplay)
+
+#fixing weird punctuation with apostrophes and line breaks
+speech$textDisplay <- gsub("&#39;", "'", speech$textDisplay)
+
+speech$textDisplay <- gsub("<br>", "", speech$textDisplay)
+
+speech$textDisplay <- gsub("&quot;", "", speech$textDisplay)
+
+#Tidy DF
+tidy_df_speech <- speech %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+    filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "jzptPcPLCnA", word != "jzptpcplcna", word != "amp") 
+
+
+```
+
+#tf idf
+```{r}
+#top words
+tidy_df_speech %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_speech$doc <- as.factor(tidy_df_speech$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_speech %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_speech, ggs, df_tf_idf, file = "../Data/speech_dfs.RData")
+#load(file = "../Data/speech_dfs.RData")
+```
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_speech %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_speech %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+
+##Determne number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+
+#pdf(file = "../Results/diagnostics_speech.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "BTS Speech Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 4")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_speech.RData")
+#load(file = "../Data/many_models_speech.RData")
+
+```
+
+#Model!
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K = 4, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_speech.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "BTS UN Speech Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+
+#pdf(file = "../Results/topic_ggs_speech.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+
+#UN Interview
+```{r}
+#Filtering to performance video
+un <- dat_comments %>%
+  filter(videoId == "wAXcMD5dOBA") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+un$textDisplay <- gsub("[^\x01-\x7F]", "", un$textDisplay)
+
+#fixing weird punctuation with apostrophes and line breaks
+un$textDisplay <- gsub("&#39;", "'", un$textDisplay)
+
+un$textDisplay <- gsub("<br>", "", un$textDisplay)
+
+un$textDisplay <- gsub("&quot;", "", un$textDisplay)
+
+#Tidy DF
+tidy_df_un <- un %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+  filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "wAXcMD5dOBA", word != "waxcmd5doba", word != "amp") 
+
+```
+
+
+#tf idf
+```{r}
+#top words
+tidy_df_un %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_un$doc <- as.factor(tidy_df_un$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_un %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_un, ggs, df_tf_idf, file = "../Data/un_dfs.RData")
+load(file = "../Data/un_dfs.RData")
+
+```
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_un %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_un %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+##Determne number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+#pdf(file = "../Results/diagnostics_un.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "UN Interview Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 4")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_un.RData")
+#load(file = "../Data/many_models_un.RData")
+
+```
+
+
+#Model
+
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K = 4, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_un.RData")
+load(file = "../Data/model_un.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "BTS and Moon UN Interview Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+
+#pdf(file = "../Results/topic_ggs_un.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+
+
+
+#ABC Interview
+```{r}
+#Filtering to performance video
+abc <- dat_comments %>%
+  filter(videoId == "NWwPyY7OHig") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+abc$textDisplay <- gsub("[^\x01-\x7F]", "", abc$textDisplay)
+
+#fixing weird punctuation with apostrophes and line breaks
+abc$textDisplay <- gsub("&#39;", "'", abc$textDisplay)
+
+abc$textDisplay <- gsub("<br>", "", abc$textDisplay)
+
+abc$textDisplay <- gsub("&quot;", "", abc$textDisplay)
+
+#Tidy DF
+tidy_df_abc <- abc %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+  filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "NWwPyY7OHig", word != "nwwpyy7ohig", word != "amp", word != "youtu.be", word != "http") 
+
+```
+
+#tf idf
+```{r}
+#top words
+tidy_df_abc %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_abc$doc <- as.factor(tidy_df_abc$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_abc %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_abc, ggs, df_tf_idf, file = "../Data/abc_dfs.RData")
+```
+
+
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_abc %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_abc %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+##Determne number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7, 8)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+#pdf(file = "../Results/diagnostics_abc.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "ABC Interview Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 4")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_abc.RData")
+load(file = "../Data/many_models_abc.RData")
+
+```
+
+
+#Model!
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K = 4, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_abc.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "BTS and Moon ABC Interview Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+#pdf(file = "../Results/topic_ggs_abc.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+
+
+
+#Moon Speech
+```{r}
+#Filtering to performance video
+moon <- dat_comments %>%
+  filter(videoId == "wT6qgOBRrps") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+moon$textDisplay <- gsub("[^\x01-\x7F]", "", moon$textDisplay)
+
+#fixing weird punctuation with apostrophes and line breaks
+moon$textDisplay <- gsub("&#39;", "'", moon$textDisplay)
+
+moon$textDisplay <- gsub("<br>", "", moon$textDisplay)
+
+moon$textDisplay <- gsub("&quot;", "", moon$textDisplay)
+
+#Tidy DF
+tidy_df_moon <- moon %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+  filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "wT6qgOBRrps", word != "wt6qgobrrps", word != "amp") 
+
+```
+
+
+#tf idf
+```{r}
+#top words
+tidy_df_moon %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_moon$doc <- as.factor(tidy_df_moon$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_moon %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_moon, ggs, df_tf_idf, file = "../Data/moon_dfs.RData")
+```
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_moon %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_moon %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+##Determne number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+#pdf(file = "../Results/diagnostics_moon.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "Moon Speech Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 4")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_moon.RData")
+#load(file = "../Data/many_models_moon.RData")
+
+```
+
+
+
+#Model
+
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K = 4, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_moon.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "Moon UN Speech Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+#pdf(file = "../Results/topic_ggs_moon.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+
+
+
+
+#Arirang
+```{r}
+#Filtering to performance video
+arirang <- dat_comments %>%
+  filter(videoId == "N11sD4isDRI") %>%
+  select(videoId, textDisplay)
+
+#getting rid of emojis (messes with models)
+arirang$textDisplay <- gsub("[^\x01-\x7F]", "", arirang$textDisplay)
+
+#fixing weird punctuation with apostrophes and line breaks
+arirang$textDisplay <- gsub("&#39;", "'", arirang$textDisplay)
+
+arirang$textDisplay <- gsub("<br>", "", arirang$textDisplay)
+
+arirang$textDisplay <- gsub("&quot;", "", arirang$textDisplay)
+
+#Tidy DF
+tidy_df_arirang <- arirang %>% #ID for each document
+  mutate(doc = row_number()) %>%  
+  unnest_tokens(word, textDisplay) %>% #splitting out individual words
+  anti_join(stop_words) %>%
+  anti_join(get_stopwords(language = "es")) %>% #remove spanish stopwords
+  filter(word != "href", word != "https", word != "https", word != "www.youtube.com", word != "N11sD4isDRI", word != "n11sd4isdri", word != "amp", word != "search_query", word != "http") 
+
+
+```
+
+
+#tf idf
+```{r}
+#top words
+tidy_df_arirang %>%
+    count(word, sort = TRUE)
+
+#factor for doc ID
+tidy_df_arirang$doc <- as.factor(tidy_df_arirang$doc)
+
+#tf idf
+df_tf_idf <- tidy_df_arirang %>%
+  count(doc, word, sort = TRUE) %>%
+  bind_tf_idf(word, doc, n) %>%
+  arrange(-tf_idf) %>%
+  group_by(doc) %>%
+  top_n(10) %>%
+  ungroup 
+
+#ggplot
+ggs <- df_tf_idf %>%
+  mutate(word = reorder_within(word, tf_idf, doc)) %>%
+  ggplot(aes(word, tf_idf, fill = doc)) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ doc, scales = "free", ncol = 3) +
+    scale_x_reordered() +
+    coord_flip()
+
+
+save(tidy_df_arirang, ggs, df_tf_idf, file = "../Data/arirang_dfs.RData")
+load(file = "../Data/arirang_dfs.RData")
+
+```
+
+
+
+##TOPIC MODEL##
+
+#DFM
+```{r}
+#dfm
+dfm <- tidy_df_arirang %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_dfm(doc, word, n)
+
+dfm_sparse <- tidy_df_arirang %>%
+    count(doc, word, sort = TRUE) %>%
+    cast_sparse(doc, word, n)
+
+```
+
+##Determne number of topics
+```{r}
+many_models <- data_frame(K = c(2, 3, 4, 5, 6, 7)) %>%
+  mutate(topic_model = furrr::future_map(K, ~stm(dfm, K = .,
+                                          verbose = FALSE)))
+
+heldout <- make.heldout(dfm)
+
+k_result <- many_models %>%
+  mutate(exclusivity = map(topic_model, exclusivity),
+         semantic_coherence = map(topic_model, semanticCoherence, dfm),
+         eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+         residual = map(topic_model, checkResiduals, dfm),
+         bound =  map_dbl(topic_model, function(x) max(x$convergence$bound)),
+         lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+         lbound = bound + lfact,
+         iterations = map_dbl(topic_model, function(x) length(x$convergence$bound)))
+
+k_result
+
+#pdf(file = "../Results/diagnostics_arirang.pdf", width = 9, height = 9)
+
+k_result %>%
+  transmute(K,
+            `Lower bound` = lbound,
+            Residuals = map_dbl(residual, "dispersion"),
+            `Semantic coherence` = map_dbl(semantic_coherence, mean),
+            `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(x = "K (number of topics)",
+       y = NULL,
+       title = "Arirang Coverage Diagnostics by Number of Topics",
+       subtitle = "These diagnostics indicate that a good number of topics would be around 3")
+
+#dev.off()
+
+save(many_models, k_result, file = "../Data/many_models_arirang.RData")
+#load(file = "../Data/many_models_arirang.RData")
+
+```
+
+
+#Model!
+```{r}
+
+#basic model
+topic_model <- stm(dfm, K = 3, 
+                   verbose = FALSE, init.type = "Spectral")
+
+save(topic_model, file = "../Data/model_arirang.RData")
+
+#tidying
+td_beta <- tidy(topic_model)
+
+
+topic_ggs <- td_beta %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    ungroup() %>%
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = "Arirang News Coverage Video Comments",
+         subtitle = "Highest word probabilities for each topic")
+
+#pdf(file = "../Results/topic_ggs_arirang.pdf", width = 9, height = 9)
+
+topic_ggs
+
+#dev.off()
+```
+
+
+
+
+#All videos together
+
+```{r}
+comments <- dat_comments$textDisplay
+
+#getting rid of emojis (messes with models)
+comments <- gsub("[^\x01-\x7F]", "", comments)
+
+#fixing weird punctuation with apostrophes and line breaks
+comments <- gsub("&#39;", "'", comments)
+
+comments <- gsub("<br>", "", comments)
+
+comments <- gsub("&quot;", "", comments)
+
+#remove Spanish stopwords (they showed up in eventual clusters)
+sp <- stopwords(kind = "sp")
+
+comments_cleaned <- remove_stopwords(comments, words = tm::stopwords("spanish"), lines = T)
+
+
+#Corpus
+doc_comments <- Corpus(VectorSource(comments_cleaned))
+
+#DTM
+dtm_comments <- DocumentTermMatrix(doc_comments,
+           control = list(stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+
+dtm_comments #very high sparsity!
+
+comments_subset <- removeSparseTerms(dtm_comments, 0.995)
+
+comments_subset
+
+
+```
+
+#K-means
+```{r}
+
+matrix_comments <- as.matrix(comments_subset)
+
+#Determine number of clusters
+k <- 7
+varper <- NULL
+for (i in 1:k) {
+    kfit <- kmeans(matrix_comments, i)
+    varper <- c(varper, kfit$betweenss/kfit$totss)
+}
+varper
+
+plot(1:k, varper, xlab = "# of clusters", ylab = "explained variance")
+
+#K-means
+kfit_comments <- kmeans(matrix_comments, 4)
+
+kfit_comments
+
+#Visualizing
+
+clusplot(matrix_comments, kfit_comments$cluster, color=TRUE, shade=TRUE, 
+         labels=3, lines=0)
+
+clustering<-kfit_comments$cluster
+p_words <- colSums(matrix_comments) / sum(matrix_comments)
+
+cluster_words <- lapply(unique(clustering), function(x){
+  rows <- matrix_comments[clustering == x , ]
+  
+  # for memory's sake, drop all words that don't appear in the cluster
+  rows <- rows[ , colSums(as.matrix(rows)) > 0 ]
+  
+  colSums(as.matrix(rows)) / sum(as.matrix(rows)) - p_words[ colnames(as.matrix(rows)) ]
+})
+
+cluster_summary <- data.frame(cluster = unique(clustering),
+                              size = as.numeric(table(clustering)),
+                              top_words = sapply(cluster_words, function(d){
+                                paste(
+                                  names(d)[ order(d, decreasing = TRUE) ][ 1:5 ], 
+                                  collapse = ", ")
+                              }),
+                              stringsAsFactors = FALSE)
+cluster_summary
+
+```
+
+
+##Frequent Terms
+
+#Speech Video
+
+```{r}
+
+dtm_speech <- DocumentTermMatrix(doc_speech,
+           control = list(stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+weighted_dtm_speech <- DocumentTermMatrix(doc_speech,
+           control = list(weighting =function(x) weightTfIdf(x, normalize = TRUE),
+                          stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+dim(dtm_speech) #9368 and 15915
+
+```
+
+#UN Interview Video
+```{r}
+
+dtm_un <- DocumentTermMatrix(doc_un,
+           control = list(stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+weighted_dtm_un <- DocumentTermMatrix(doc_un,
+           control = list(weighting =function(x) weightTfIdf(x, normalize = TRUE),
+                          stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+dim(dtm_un) #121593 and 22233
+
+
+```
+
+#ABC Interview Video
+```{r}
+
+dtm_abc <- DocumentTermMatrix(doc_abc,
+           control = list(stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+weighted_dtm_abc <- DocumentTermMatrix(doc_abc,
+           control = list(weighting =function(x) weightTfIdf(x, normalize = TRUE),
+                          stopwords = TRUE,
+                          tolower = TRUE,
+                          removeNumbers = TRUE,
+                          removePunctuation = TRUE,
+                          stemming=TRUE))
+
+dim(dtm_abc) #2616 and 6901
+
+
+```
+
+
+
+```{r}
+#TF-IDF
+dtm_speech <- weightTfIdf(dtm_speech, normalize = TRUE)
+matrix_speech = as.matrix(dtm_speech)
+
+dtm_un <- weightTfIdf(dtm_un, normalize = TRUE)
+matrix_un <- as.matrix(dtm_un)
+
+dtm_abc <- weightTfIdf(dtm_abc, normalize = TRUE)
+matrix_abc = as.matrix(dtm_abc)
+```
+
+
+
+##Exploring frequent terms
+
+#Performance
+```{r}
+
+freq_perf <- colSums(as.matrix(weighted_dtm_perf))
+
+# order
+dtm_ordered_perf <- weighted_dtm_perf[,order(freq_perf, decreasing = T)]
+
+inspect(dtm_ordered_perf[1:5,1:5])
+top_5_perf <- dtm_ordered_perf[["dimnames"]][["Terms"]][1:5]
+
+findFreqTerms(dtm_ordered_perf, lowfreq=500)
+
+findAssocs(weighted_dtm_perf, "bts", 0.01)
+
+```
+
+
+#Speech
+```{r}
+
+freq_speech <- colSums(as.matrix(weighted_dtm_speech))
+
+# order
+dtm_ordered_speech <- weighted_dtm_speech[,order(freq_speech, decreasing = T)]
+
+inspect(dtm_ordered_speech[1:5,1:5])
+top_10_speech <- dtm_ordered_speech[["dimnames"]][["Terms"]][1:10]
+
+findFreqTerms(dtm_ordered_speech, lowfreq=500)
+
+#####Start here for Table of Related Terms
+pres_1 <- findAssocs(weighted_dtm_speech, "presid", 0.09)
+pres_2 <- findAssocs(weighted_dtm_un, "presid", 0.05)
+#pres_3 <- 
+  
+  findAssocs(weighted_dtm_abc, "presid", 0.09)
+
+pres_2 <- pres_2[[1:12]]
+
+pres <- data_frame(pres_1$presid, pres_2$presid, pres_3$presid)
+```
+
+#UN
+```{r}
+
+freq_un <- colSums(as.matrix(weighted_dtm_un))
+
+# order
+dtm_ordered_un <- weighted_dtm_un[,order(freq_un, decreasing = T)]
+
+inspect(dtm_ordered_un[1:5,1:5])
+top_10_un <- dtm_ordered_un[["dimnames"]][["Terms"]][1:10]
+
+findFreqTerms(dtm_ordered_un, lowfreq=500)
+
+findAssocs(weighted_dtm_un, "presid", 0.01)
+
+```
+
+#ABC
+```{r}
+
+freq_abc <- colSums(as.matrix(weighted_dtm_abc))
+
+# order
+dtm_ordered_abc <- weighted_dtm_abc[,order(freq_abc, decreasing = T)]
+
+inspect(dtm_ordered_abc[1:5,1:5])
+top_10_abc <- dtm_ordered_abc[["dimnames"]][["Terms"]][1:10]
+
+findFreqTerms(dtm_ordered_abc, lowfreq=500)
+
+findAssocs(weighted_dtm_abc, "presid", 0.01)
+
+```
+
+#Top Freq Terms
+```{r}
+top_10 <- data.frame(top_10_perf, top_10_speech, top_10_un, top_10_abc)
+
+save(top_10, file = "../Data/top_10_terms.RData")
+```
